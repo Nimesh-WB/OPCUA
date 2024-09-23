@@ -5,7 +5,9 @@ var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
 builder.Services.AddControllers();
+builder.Services.AddHttpClient();
 builder.Services.AddSingleton<OpcUaServerService>();
+builder.Services.AddSingleton<TestService>();
 
 var app = builder.Build();
 

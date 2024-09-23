@@ -1,25 +1,36 @@
 ﻿using Opc.Ua;
 using Opc.Ua.Server;
+using System;
+using System.IO;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
-using System.IO;
 using System.Threading.Tasks;
-using System.Configuration;
+using Opc.Ua.Configuration;
 
 namespace CustomServer.Services
 {
     public class OpcUaServerService
     {
         private readonly StandardServer _server;
+        private bool _isServerRunning;
 
         public OpcUaServerService()
         {
             _server = new StandardServer();
+            _isServerRunning = false;
         }
 
         public async Task StartServer()
         {
-            var config = new ApplicationConfiguration()
+            if (_isServerRunning)
+            {
+               StopServer();
+            }
+
+            // Specify the common folder for certificates
+            var certificateFolder = "Certificates/OpcUaCerts";
+
+            var config = new ApplicationConfiguration
             {
                 ApplicationName = "MyOpcUaServer",
                 ApplicationType = ApplicationType.Server,
@@ -28,23 +39,23 @@ namespace CustomServer.Services
                     ApplicationCertificate = new CertificateIdentifier
                     {
                         StoreType = "Directory",
-                        StorePath = "Certificates/UA_MachineDefault",
+                        StorePath = certificateFolder,
                         SubjectName = "MyOpcUaServer"
                     },
                     TrustedPeerCertificates = new CertificateTrustList
                     {
                         StoreType = "Directory",
-                        StorePath = "Certificates/UA Applications"
+                        StorePath = certificateFolder
                     },
                     TrustedIssuerCertificates = new CertificateTrustList
                     {
                         StoreType = "Directory",
-                        StorePath = "Certificates/UA Certificate Authorities"
+                        StorePath = certificateFolder
                     },
                     RejectedCertificateStore = new CertificateTrustList
                     {
                         StoreType = "Directory",
-                        StorePath = "Certificates/Rejected"
+                        StorePath = certificateFolder
                     },
                     AutoAcceptUntrustedCertificates = true
                 },
@@ -57,8 +68,8 @@ namespace CustomServer.Services
                     {
                         new ServerSecurityPolicy
                         {
-                            SecurityMode = MessageSecurityMode.None,
-                            SecurityPolicyUri = SecurityPolicies.None
+                            SecurityMode = MessageSecurityMode.SignAndEncrypt,
+                            SecurityPolicyUri = SecurityPolicies.Basic256Sha256
                         }
                     },
                     UserTokenPolicies = new UserTokenPolicyCollection
@@ -69,57 +80,83 @@ namespace CustomServer.Services
                 TraceConfiguration = new TraceConfiguration
                 {
                     OutputFilePath = "Logs/OpcUaServer.log",
-                    TraceMasks = 0
+                    TraceMasks = Utils.TraceMasks.All
                 }
             };
 
-            await config.Validate(ApplicationType.Server).ConfigureAwait(false);
-
-            // Ensure the application certificate exists
-            if (config.SecurityConfiguration.ApplicationCertificate.Certificate == null)
+            // Load or create the certificate if it doesn't exist
+            var certIdentifier = config.SecurityConfiguration.ApplicationCertificate;
+            var certFilePath = Path.Combine(certificateFolder, "MyOpcUaServer.pfx");
+            if (File.Exists(certFilePath))
             {
-                var certificate = CreateSelfSignedCertificate(config.ApplicationName);
-                // Save the certificate to the store
-                var storePath = config.SecurityConfiguration.ApplicationCertificate.StorePath;
-                Directory.CreateDirectory(storePath); 
-                var store = new X509Store(config.SecurityConfiguration.ApplicationCertificate.StoreType, StoreLocation.CurrentUser);
-                store.Open(OpenFlags.ReadWrite);
-                store.Add(certificate);
-                store.Close();
+                // Load the existing certificate
+                var certBytes = File.ReadAllBytes(certFilePath);
+                certIdentifier.Certificate = new X509Certificate2(certBytes, "Wonderbiz@123"); // Load with the correct password
+            }
+            else
+            {
+                // Create a new certificate if it doesn't exist
+                var certificatePassword = "Wonderbiz@123"; // Set your password here
+                var certificate = CreateSelfSignedCertificate(config.ApplicationName, certificatePassword);
+                if (certificate != null)
+                {
+                    Directory.CreateDirectory(certIdentifier.StorePath);
+                    using (var store = new X509Store(StoreName.My, StoreLocation.CurrentUser))
+                    {
+                        store.Open(OpenFlags.ReadWrite);
+                        store.Add(certificate);
+                    }
 
-                config.SecurityConfiguration.ApplicationCertificate.Certificate = certificate;
+                    if (certIdentifier.SubjectName == null)
+                    {
+                        throw new Exception("Failed to load the application certificate after creation.");
+                    }
+                }
+                else
+                {
+                    throw new Exception("Certificate creation failed.");
+                }
             }
 
-            // Ensure at least one transport configuration is present
-            if (config.TransportConfigurations.Count == 0)
-            {
-                // Add default transport configuration if necessary
-            }
+            // Validate configuration
+            await config.Validate(ApplicationType.Server);
+            var applicationInstance = new ApplicationInstance(config);
 
-            // Start the server asynchronously
-            await Task.Run(() =>
-            {
-                _server.Start(configuration: config);
-            }).ConfigureAwait(false);
+            // Check or create certificate
+            await applicationInstance.CheckApplicationInstanceCertificate(false, CertificateFactory.DefaultKeySize);
+
+            // Start the server
+            await applicationInstance.Start(_server);
+            _isServerRunning = true;
         }
 
-        private X509Certificate2 CreateSelfSignedCertificate(string subjectName)
+        private X509Certificate2 CreateSelfSignedCertificate(string subjectName, string password)
         {
             using (var rsa = RSA.Create(2048))
             {
-                var request = new CertificateRequest(
-                    $"CN={subjectName}",
-                    rsa,
-                    HashAlgorithmName.SHA256,
-                    RSASignaturePadding.Pkcs1);
-
+                var request = new CertificateRequest($"CN={subjectName}", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
                 var certificate = request.CreateSelfSigned(DateTimeOffset.Now, DateTimeOffset.Now.AddYears(10));
 
-                // Export and save the certificate to a file if needed
-                var certPath = Path.Combine("Certificates", "UA_MachineDefault", $"{subjectName}.pfx");
-                File.WriteAllBytes(certPath, certificate.Export(X509ContentType.Pfx));
+                // Store the certificate in a common folder
+                var certDirectory = Path.Combine("Certificates", "OpcUaCerts");
+                Directory.CreateDirectory(certDirectory);
+                var certPath = Path.Combine(certDirectory, $"{subjectName}.pfx");
+
+                // Export the certificate with a password
+                var certBytes = certificate.Export(X509ContentType.Pfx, password);
+                File.WriteAllBytes(certPath, certBytes);
 
                 return certificate;
+            }
+        }
+
+        public void StopServer()
+        {
+            if (_isServerRunning)
+            {
+                // Stop the OPC UA server
+                _server.Stop();
+                _isServerRunning = false;
             }
         }
     }
