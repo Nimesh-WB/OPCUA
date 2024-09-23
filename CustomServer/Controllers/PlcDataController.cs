@@ -52,12 +52,12 @@ namespace CustomServer.Controllers
         private async Task<HttpResponseMessage> SendMqttMessage(string topic, string message)
         {
             var client = _httpClientFactory.CreateClient();
-            var url = $"http://localhost:5007/api/mqtt/publish?topic={Uri.EscapeUriString(topic)}";
+            var url = $"http://localhost:5079/api/mqtt/publish";
 
             var postData = new Dictionary<string, string>
             {
-                { "topic", topic },
-                { "message", message }
+                { "tag", topic },
+                { "value", message }
             };
 
             var json = JsonConvert.SerializeObject(postData);
